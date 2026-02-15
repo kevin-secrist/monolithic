@@ -47,10 +47,11 @@ echo "" >> "$POOLS_TMP_FILE"
 # Initialize maps file
 echo "# Map hostnames to upstream pools for keepalive routing" > "$MAPS_TMP_FILE"
 echo "" >> "$MAPS_TMP_FILE"
-echo "map \$http_host \$upstream_name {" >> "$MAPS_TMP_FILE"
+echo "map \$http_host \$upstream_name_default {" >> "$MAPS_TMP_FILE"
 echo "    hostnames;" >> "$MAPS_TMP_FILE"
 echo "    default \$host;  # Fallback to direct proxy for unmapped domains" >> "$MAPS_TMP_FILE"
-echo "    *.steamcontent.com lancache_steamcontent_com; # Redirect all steam traffic" >> "$MAPS_TMP_FILE"
+
+STEAM_UPSTREAM_NAME=""
 
 while read CACHE_ENTRY; do
     SERVICE_NAME=$(jq -r ".cache_domains[$CACHE_ENTRY].name" cache_domains.json)
@@ -111,11 +112,29 @@ EOF
 
             # Add mapping entry
             echo "    ${DOMAIN} ${UPSTREAM_NAME};" >> "$MAPS_TMP_FILE"
+
+            # Track steam upstream for user-agent based routing
+            if [[ "$SERVICE_NAME" == "steam" && -z "$STEAM_UPSTREAM_NAME" ]]; then
+                STEAM_UPSTREAM_NAME="$UPSTREAM_NAME"
+            fi
         done < "${CACHEHOSTS_FILENAME}"
     done < <(jq -r ".cache_domains[$CACHE_ENTRY].domain_files | to_entries[] | .key" cache_domains.json)
 done < <(jq -r '.cache_domains | to_entries[] | .key' cache_domains.json)
 
-# Close the map block
+# Close the hostname map block
+echo "}" >> "$MAPS_TMP_FILE"
+
+# Add user-agent based map for Steam client detection
+# Steam uses a trigger domain for DNS but actual requests come from various *.steamcontent.com hosts.
+# Instead of hardcoding the wildcard (which bypasses cache-domains logic), we detect the
+# Valve/Steam user-agent and route those requests to the steam upstream pool.
+echo "" >> "$MAPS_TMP_FILE"
+echo "# Steam user-agent detection - routes Steam client traffic to steam upstream pool" >> "$MAPS_TMP_FILE"
+echo "map \$http_user_agent \$upstream_name {" >> "$MAPS_TMP_FILE"
+echo "    default \$upstream_name_default;" >> "$MAPS_TMP_FILE"
+if [ -n "$STEAM_UPSTREAM_NAME" ]; then
+    echo "    ~Valve\\/Steam\\ HTTP\\ Client\\ 1\\.0 ${STEAM_UPSTREAM_NAME};" >> "$MAPS_TMP_FILE"
+fi
 echo "}" >> "$MAPS_TMP_FILE"
 
 # Copy to final locations
